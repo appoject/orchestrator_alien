@@ -1,0 +1,56 @@
+[package]
+name = "orchestrator_alien"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+state = "0.6.0"
+
+# ========== Common game library ==========
+common-game = "3.0.0"
+
+# ========== Channel communication ==========
+crossbeam-channel = "0.5"
+
+# ========== Logging ==========
+log = "0.4"
+env_logger = "0.11"
+
+# ========== Async runtime ==========
+tokio = { version = "1.0", features = ["full"] }
+
+# ========== Random number generation ==========
+rand = "0.9"
+
+# ========== Planets as Dependencies ==========
+orbitron = { git = "https://github.com/Advanced-Programming-2025-Orbitron/Orbitron.git", optional = true }
+skycartel = { git = "https://github.com/0TH08/Skycartel.git", optional = true }
+rustrelli = { git = "https://github.com/Rustrelli/rustrelli.git", optional = true }
+the-compiler-strikes-back = { git = "https://github.com/TheCompilerStrikesBackAP2025/TheCompilerStrikesBack.git", optional = true }
+crabtorio = { git = "https://github.com/crabtorio/crabtorio.git", package = "planet", optional = true }
+houston = { git = "https://github.com/Houston-we-have-a-borrow/Planet.git", package = "Planet", optional = true }
+enterprise = { git = "https://github.com/Thompspsps/Enterprise_planet.git", optional = true }
+
+# ========== Explorers as Dependencies ==========
+explorer-viviana = { git = "https://github.com/vivis2kuni/explorer_viviana.git", package = "explorer_astronaut", optional = true }
+
+# ========== GUI Dependencies (OPTIONAL) ==========
+bevy = { version = "0.13", optional = true }
+bevy_egui = { version = "0.25", optional = true }
+serde = { version = "1.0.228", features = ["derive"] }
+chrono = "0.4.43"
+
+[features]
+default = ["all-planets", "all-explorers"]
+all-planets = ["orbitron", "skycartel", "rustrelli", "the-compiler-strikes-back", "crabtorio", "houston", "enterprise"]
+all-explorers = ["explorer-viviana"]
+gui = ["bevy", "bevy_egui"]
+
+[[bin]]
+name = "orchestrator_alien"
+path = "src/main.rs"
+
+[[bin]]
+name = "orchestrator-gui"
+path = "src/bin/gui.rs"
+required-features = ["gui"]
