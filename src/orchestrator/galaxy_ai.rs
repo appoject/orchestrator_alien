@@ -1,29 +1,35 @@
 //! Galaxy AI that decides when to send sunrays and asteroids.
 //!
 //! Mechanic:
-//! - A sunray is sent to a random alive planet once per "time interval".
+//! - A sunray is sent to a random alive planet on a cadence set by
+//!   `sunray_scale_cycles`, which slows down sharply as the galaxy shrinks
+//!   so survivors don't out-heal a thinning attack pool.
 //! - The AI keeps a "target set" of up to 3 consecutive alive planets
 //!   (consecutive = adjacent positions in the sorted list of currently
 //!   alive planet IDs, wrapping around if the start is near the end).
 //! - Against the current target set the AI performs exactly two asteroid
 //!   attempts, each aimed at a uniformly random *currently alive* member
 //!   of the set. After each attempt the AI goes silent on asteroids (but
-//!   keeps sending sunrays) for a number of time intervals depending on
-//!   whether the attempt destroyed the planet or was defended, and on
+//!   keeps sending sunrays) for a fixed number of time intervals depending
+//!   on whether the attempt destroyed the planet or was defended, and on
 //!   whether it was the first or second attempt:
 //!
 //!     attempt 1: destroyed -> 3 intervals, defended -> 6 intervals
 //!     attempt 2: destroyed -> 8 intervals, defended -> 10 intervals
 //!
 //!   After the second attempt's cooldown elapses, a brand new target set
-//!   is selected.
-//! - A "time interval" is not a fixed number of engine cycles: it scales
-//!   with how many planets are still alive (see `scale_cycles`).
+//!   is selected. These interval counts are NOT rescaled by alive-planet
+//!   count - only the sunray cadence is, since that's what was letting
+//!   survivors fully recharge indefinitely.
+//! - `scale_cycles` (asteroid pacing) and `sunray_scale_cycles` (sunray
+//!   pacing) are deliberately different functions - see each for why.
 //!
 //! Because asteroid outcomes are only known asynchronously (a planet acks
 //! later via `PlanetToOrchestrator::AsteroidAck`), this AI does not decide
 //! outcomes itself. The orchestrator must call [`GalaxyAI::notify_asteroid_result`]
-//! whenever such an ack arrives.
+//! whenever such an ack arrives. If no ack ever arrives (e.g. a buggy
+//! planet implementation), [`GalaxyAI::update`] self-heals via a timeout
+//! so the campaign can't stall forever.
 
 use common_game::utils::ID;
 use rand::seq::{IndexedRandom, SliceRandom};
@@ -68,6 +74,8 @@ pub struct GalaxyAI {
     cooldown_intervals_remaining: u32,
     /// Cycles elapsed within the interval currently being counted down.
     cooldown_cycle_progress: u32,
+    /// Cycles spent waiting for the current pending shot's ack.
+    waiting_cycle_progress: u32,
 
     // ---- sunray heartbeat state ----
     /// Cycles elapsed within the current sunray interval.
@@ -75,6 +83,12 @@ pub struct GalaxyAI {
 }
 
 impl GalaxyAI {
+    /// If an asteroid ack doesn't arrive within this many engine cycles, the
+    /// shot is treated as lost/unresponsive so the campaign can keep moving
+    /// instead of stalling forever (protects against a planet impl that
+    /// never acks).
+    const ASTEROID_ACK_TIMEOUT_CYCLES: u32 = 50;
+
     /// Creates a new Galaxy AI that will NOT act until enabled.
     #[must_use]
     pub fn new_inactive() -> Self {
@@ -86,6 +100,7 @@ impl GalaxyAI {
             pending_target: None,
             cooldown_intervals_remaining: 0,
             cooldown_cycle_progress: 0,
+            waiting_cycle_progress: 0,
             sunray_cycle_progress: 0,
         }
     }
@@ -138,14 +153,31 @@ impl GalaxyAI {
         self.cooldown_intervals_remaining
     }
 
-    /// Number of engine cycles making up one "time interval", given how
-    /// many planets are currently alive.
+    /// Cycles between asteroid-campaign pacing ticks (attack cadence,
+    /// cooldown countdown speed). Deliberately mild - the *interval counts*
+    /// (3/6/8/10) already do most of the endgame pacing work.
     fn scale_cycles(alive_count: usize) -> u32 {
         match alive_count {
             6..=7 => 1,
             4..=5 => 2,
             2..=3 => 3,
             0..=1 => 4,
+            _ => 1,
+        }
+    }
+
+    /// Cycles between sunray heartbeats. This must fall off much faster
+    /// than `scale_cycles` as the galaxy shrinks: with fewer alive planets,
+    /// any single planet has a much higher chance of being the one a
+    /// random sunray lands on, so firing needs to slow down
+    /// disproportionately or survivors can recharge a rocket before every
+    /// single asteroid attempt, and the campaign never concludes.
+    fn sunray_scale_cycles(alive_count: usize) -> u32 {
+        match alive_count {
+            6..=7 => 1,
+            4..=5 => 4,
+            2..=3 => 12,
+            0..=1 => 20,
             _ => 1,
         }
     }
@@ -187,8 +219,8 @@ impl GalaxyAI {
             return actions;
         }
 
-        // ---- sunray heartbeat: fires once per time interval, always ----
-        let sunray_interval_cycles = Self::scale_cycles(alive_planets_sorted.len());
+        // ---- sunray heartbeat: fires once per (harshly scaled) interval ----
+        let sunray_interval_cycles = Self::sunray_scale_cycles(alive_planets_sorted.len());
         self.sunray_cycle_progress += 1;
         if self.sunray_cycle_progress >= sunray_interval_cycles {
             self.sunray_cycle_progress = 0;
@@ -217,6 +249,7 @@ impl GalaxyAI {
                     );
                     actions.push(GalaxyAction::SendAsteroid { target_planet: target });
                     self.pending_target = Some(target);
+                    self.waiting_cycle_progress = 0;
                     self.asteroid_state = AsteroidState::WaitingForResult;
                 }
                 None => {
@@ -226,7 +259,27 @@ impl GalaxyAI {
                 }
             },
             AsteroidState::WaitingForResult => {
-                // waiting for notify_asteroid_result() to be called
+                self.waiting_cycle_progress += 1;
+                if self.waiting_cycle_progress >= Self::ASTEROID_ACK_TIMEOUT_CYCLES {
+                    let stuck_planet = self.pending_target;
+                    log::warn!(
+                        "Galaxy AI: no asteroid ack from planet {:?} after {} cycles \
+                         (planet implementation likely didn't respond) - dropping it \
+                         from the target set and moving on",
+                        stuck_planet, self.waiting_cycle_progress
+                    );
+                    if let Some(id) = stuck_planet {
+                        self.target_set.retain(|&p| p != id);
+                    }
+                    self.pending_target = None;
+                    self.attempts_made += 1;
+                    self.waiting_cycle_progress = 0;
+                    self.asteroid_state = if self.attempts_made >= 2 || self.target_set.is_empty() {
+                        AsteroidState::SelectingTargets
+                    } else {
+                        AsteroidState::ReadyToAttack
+                    };
+                }
             }
             AsteroidState::Cooldown => {
                 let interval_cycles = Self::scale_cycles(alive_planets_sorted.len());
@@ -275,5 +328,26 @@ impl GalaxyAI {
             self.attempts_made,
             self.cooldown_intervals_remaining
         );
+    }
+
+    /// Must be called whenever a planet is removed from the galaxy through
+    /// any path other than a normal asteroid ack (disconnection, GUI kill,
+    /// destruction chain, etc.), so the AI never stalls forever waiting for
+    /// an ack that will never arrive.
+    pub fn notify_planet_removed(&mut self, planet_id: ID) {
+        self.target_set.retain(|&id| id != planet_id);
+
+        if self.pending_target == Some(planet_id) {
+            self.pending_target = None;
+            self.attempts_made += 1;
+            self.cooldown_intervals_remaining = if self.attempts_made <= 1 { 3 } else { 8 };
+            self.cooldown_cycle_progress = 0;
+            self.asteroid_state = AsteroidState::Cooldown;
+
+            log::warn!(
+                "Galaxy AI: planet {planet_id} removed while an asteroid was pending; \
+                 forcing cooldown to avoid a stall"
+            );
+        }
     }
 }

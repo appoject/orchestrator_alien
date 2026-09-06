@@ -67,6 +67,7 @@ fn handle_planet_destruction(orchestrator: &mut Orchestrator, planet_id: ID) {
         log::debug!("Explorer {} removed due to planet destruction", explorer_id);
     }
 
+    orchestrator.get_galaxy_ai_mut().notify_planet_removed(planet_id);
     orchestrator.state.remove_planet(planet_id);
     orchestrator.planet_senders.remove(&planet_id);
     orchestrator.planet_receivers.remove(&planet_id);

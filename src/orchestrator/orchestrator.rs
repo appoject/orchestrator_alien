@@ -401,6 +401,7 @@ impl Orchestrator {
             let _ = sender.send(OrchestratorToPlanet::KillPlanet);
         }
 
+        self.galaxy_ai.notify_planet_removed(planet_id);
         self.planet_senders.remove(&planet_id);
         self.planet_receivers.remove(&planet_id);
         self.state.remove_planet(planet_id);

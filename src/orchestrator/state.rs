@@ -115,6 +115,7 @@ pub struct SystemState {
     planet_stats: HashMap<ID, PlanetStats>,
     explorer_stats: HashMap<ID, ExplorerStats>,
     game_stats: GameStats,
+    explorers_ever_added: bool,
 }
 
 impl SystemState {
@@ -128,6 +129,7 @@ impl SystemState {
             planet_stats: HashMap::new(),
             explorer_stats: HashMap::new(),
             game_stats: GameStats::default(),
+            explorers_ever_added: false,
         }
     }
 
@@ -141,6 +143,7 @@ impl SystemState {
             planet_stats: HashMap::new(),
             explorer_stats: HashMap::new(),
             game_stats: GameStats::default(),
+            explorers_ever_added: false,
         }
     }
 
@@ -265,6 +268,7 @@ impl SystemState {
         }
         self.explorer_locations.insert(explorer_id, planet_id);
         self.explorer_stats.insert(explorer_id, ExplorerStats::default());
+        self.explorers_ever_added = true;
         log::info!("Explorer {} added on planet {}", explorer_id, planet_id);
         Ok(())
     }
@@ -274,6 +278,11 @@ impl SystemState {
         self.explorer_stats.remove(&explorer_id);
         self.game_stats.explorers_killed += 1;
         log::info!("Explorer {} removed", explorer_id);
+
+        if self.explorers_ever_added && self.explorer_locations.is_empty() {
+            log::warn!("All explorers eliminated - ending game");
+            self.end_game();
+        }
     }
 
     #[must_use]
